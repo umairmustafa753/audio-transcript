@@ -8,22 +8,22 @@ import { Waveform } from "./Waveform";
 import { IconButton } from "./ui";
 
 const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
+const SKIP_SECONDS = 10;
 
-export interface PlayerApi {
+export interface AudioPlayerApi {
+  audioRef: React.RefObject<HTMLAudioElement | null>;
   currentTime: number;
   duration: number;
   playing: boolean;
   seek: (time: number) => void;
   toggle: () => void;
-}
-
-export function useAudioPlayer(url: string | null): PlayerApi & {
-  audioRef: React.RefObject<HTMLAudioElement | null>;
   rate: number;
   setRate: (rate: number) => void;
   muted: boolean;
   setMuted: (muted: boolean) => void;
-} {
+}
+
+export function useAudioPlayer(url: string | null): AudioPlayerApi {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -65,20 +65,18 @@ export function useAudioPlayer(url: string | null): PlayerApi & {
     };
     const onSeeked = () => setCurrentTime(audio.currentTime);
 
-    audio.addEventListener("play", onPlay);
-    audio.addEventListener("pause", onPause);
-    audio.addEventListener("ended", onPause);
-    audio.addEventListener("loadedmetadata", onLoaded);
-    audio.addEventListener("durationchange", onLoaded);
-    audio.addEventListener("seeked", onSeeked);
+    const listeners: [string, EventListener][] = [
+      ["play", onPlay],
+      ["pause", onPause],
+      ["ended", onPause],
+      ["loadedmetadata", onLoaded],
+      ["durationchange", onLoaded],
+      ["seeked", onSeeked],
+    ];
+    for (const [type, listener] of listeners) audio.addEventListener(type, listener);
     return () => {
       cancelAnimationFrame(frame);
-      audio.removeEventListener("play", onPlay);
-      audio.removeEventListener("pause", onPause);
-      audio.removeEventListener("ended", onPause);
-      audio.removeEventListener("loadedmetadata", onLoaded);
-      audio.removeEventListener("durationchange", onLoaded);
-      audio.removeEventListener("seeked", onSeeked);
+      for (const [type, listener] of listeners) audio.removeEventListener(type, listener);
     };
   }, [url]);
 
@@ -114,7 +112,7 @@ interface AudioPlayerProps {
   url: string | null;
   peaks: Float32Array | null;
   fallbackDuration: number;
-  player: ReturnType<typeof useAudioPlayer>;
+  player: AudioPlayerApi;
 }
 
 export function AudioPlayer({ url, peaks, fallbackDuration, player }: AudioPlayerProps) {
@@ -169,10 +167,10 @@ export function AudioPlayer({ url, peaks, fallbackDuration, player }: AudioPlaye
         </button>
 
         <div className="flex items-center">
-          <IconButton label="Back 10 seconds" onClick={() => seek(currentTime - 10)}>
+          <IconButton label={`Back ${SKIP_SECONDS} seconds`} onClick={() => seek(currentTime - SKIP_SECONDS)}>
             <RotateCcw className="size-4" strokeWidth={1.75} />
           </IconButton>
-          <IconButton label="Forward 10 seconds" onClick={() => seek(currentTime + 10)}>
+          <IconButton label={`Forward ${SKIP_SECONDS} seconds`} onClick={() => seek(currentTime + SKIP_SECONDS)}>
             <RotateCw className="size-4" strokeWidth={1.75} />
           </IconButton>
         </div>

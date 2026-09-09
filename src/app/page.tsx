@@ -6,44 +6,42 @@ import { Dropzone } from "@/components/Dropzone";
 import { JobList } from "@/components/JobList";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { SidebarFooter } from "@/components/SidebarFooter";
-import { EmptyTranscript, TranscriptPanel } from "@/components/TranscriptPanel";
+import { TranscriptPanel } from "@/components/TranscriptPanel";
+import { EmptyTranscript } from "@/components/transcript/EmptyTranscript";
 import { useApp } from "@/lib/store";
-
-const BUSY = ["decoding", "loading-model", "transcribing"];
+import { isBusy } from "@/lib/jobStatus";
+import { isTypingTarget, useThemeAttribute, useWindowKeyDown } from "@/lib/hooks";
 
 export default function Page() {
   const hydrate = useApp((s) => s.hydrate);
   const hydrated = useApp((s) => s.hydrated);
   const jobs = useApp((s) => s.jobs);
   const selectedId = useApp((s) => s.selectedId);
+  const theme = useApp((s) => s.settings.theme);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     void hydrate();
   }, [hydrate]);
 
+  useThemeAttribute(theme);
+
   // Warn before a reload throws away work in progress.
+  const working = jobs.some((job) => isBusy(job.status));
   useEffect(() => {
-    if (!jobs.some((job) => BUSY.includes(job.status))) return;
+    if (!working) return;
     const handler = (event: BeforeUnloadEvent) => event.preventDefault();
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [jobs]);
+  }, [working]);
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable) {
-        return;
-      }
-      if (event.key === "," && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault();
-        setSettingsOpen(true);
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  useWindowKeyDown((event) => {
+    if (isTypingTarget(event.target)) return;
+    if (event.key === "," && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      setSettingsOpen(true);
+    }
+  });
 
   const selected = jobs.find((job) => job.id === selectedId) ?? null;
 

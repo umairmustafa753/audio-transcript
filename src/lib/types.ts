@@ -1,5 +1,8 @@
 export type ProviderId = "local" | "openai" | "groq";
 
+/** Every provider that transcribes over the network rather than in the tab. */
+export type CloudProviderId = Exclude<ProviderId, "local">;
+
 export type Task = "transcribe" | "translate";
 
 export type JobStatus =
@@ -69,7 +72,7 @@ export interface Settings {
   /** model id used by the selected cloud provider */
   cloudModel: string;
   /** optional user-supplied keys, kept in localStorage only */
-  apiKeys: Partial<Record<Exclude<ProviderId, "local">, string>>;
+  apiKeys: Partial<Record<CloudProviderId, string>>;
   theme: "system" | "light" | "dark";
 }
 
@@ -78,5 +81,4 @@ export interface ModelOption {
   label: string;
   size: string;
   note: string;
-  multilingual: boolean;
 }

@@ -11,12 +11,157 @@ interface WaveformProps {
   height?: number;
 }
 
+const BAR = 3;
+const GAP = 2;
+/** Floor amplitudes so silence still shows a hairline rather than nothing. */
+const SILENT_AMP = 0.045;
+const MIN_AMP = 0.06;
+/** A gentle curve keeps quiet passages visible without flattening loud ones. */
+const AMP_CURVE = 0.6;
+const MIN_BAR_HEIGHT = 3;
+/** Bars within this many pixels of the cursor swell, by up to HOVER_SWELL. */
+const HOVER_RADIUS = 34;
+const HOVER_SWELL = 0.4;
+const NUDGE_SECONDS = 5;
+
+interface Palette {
+  accent: string;
+  accent2: string;
+  idle: string;
+}
+
+/** Layout derived once per paint and shared by every drawing pass. */
+interface Geometry {
+  width: number;
+  height: number;
+  mid: number;
+  maxBar: number;
+  barCount: number;
+  progressX: number;
+  hoverX: number | null;
+}
+
 function cssVar(el: HTMLElement, name: string, fallback: string): string {
   return getComputedStyle(el).getPropertyValue(name).trim() || fallback;
 }
 
-const BAR = 3;
-const GAP = 2;
+function readPalette(canvas: HTMLCanvasElement): Palette {
+  return {
+    accent: cssVar(canvas, "--accent", "#8b6dff"),
+    accent2: cssVar(canvas, "--accent-2", "#b39aff"),
+    idle: cssVar(canvas, "--wave-idle", "#55556a"),
+  };
+}
+
+/** Mean peak across the slice of the envelope this bar represents. */
+function barAmplitude(peaks: Float32Array | null, index: number, barCount: number): number {
+  if (!peaks || peaks.length === 0) return SILENT_AMP;
+  const from = Math.floor((index / barCount) * peaks.length);
+  const to = Math.max(from + 1, Math.floor(((index + 1) / barCount) * peaks.length));
+  let sum = 0;
+  for (let p = from; p < to && p < peaks.length; p++) sum += peaks[p];
+  return Math.max(MIN_AMP, Math.pow(sum / (to - from), AMP_CURVE));
+}
+
+/** A lit band behind everything that has played. */
+function drawProgressWash(ctx: CanvasRenderingContext2D, geo: Geometry, palette: Palette) {
+  if (geo.progressX <= 0) return;
+  const wash = ctx.createLinearGradient(0, 0, 0, geo.height);
+  wash.addColorStop(0, "transparent");
+  wash.addColorStop(0.5, palette.accent);
+  wash.addColorStop(1, "transparent");
+  ctx.globalAlpha = 0.09;
+  ctx.fillStyle = wash;
+  ctx.fillRect(0, 0, geo.progressX, geo.height);
+  ctx.globalAlpha = 1;
+}
+
+function drawBars(
+  ctx: CanvasRenderingContext2D,
+  geo: Geometry,
+  palette: Palette,
+  peaks: Float32Array | null,
+) {
+  // Played bars are brightest at the centre line, so the waveform reads as lit.
+  const played = ctx.createLinearGradient(0, geo.mid - geo.maxBar / 2, 0, geo.mid + geo.maxBar / 2);
+  played.addColorStop(0, palette.accent2);
+  played.addColorStop(0.5, palette.accent);
+  played.addColorStop(1, palette.accent2);
+
+  for (let i = 0; i < geo.barCount; i++) {
+    const x = i * (BAR + GAP);
+    let h = Math.max(MIN_BAR_HEIGHT, barAmplitude(peaks, i, geo.barCount) * geo.maxBar);
+
+    // Bars swell under the cursor.
+    if (geo.hoverX !== null) {
+      const distance = Math.abs(x + BAR / 2 - geo.hoverX);
+      if (distance < HOVER_RADIUS) {
+        h = Math.min(geo.maxBar, h * (1 + HOVER_SWELL * (1 - distance / HOVER_RADIUS)));
+      }
+    }
+
+    const isPlayed = x + BAR <= geo.progressX;
+    ctx.fillStyle = isPlayed ? played : palette.idle;
+    ctx.globalAlpha = isPlayed ? 1 : 0.78;
+    ctx.beginPath();
+    ctx.roundRect(x, geo.mid - h / 2, BAR, h, BAR / 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+/** Soften the outer edges so the waveform sits on the panel rather than on top of it. */
+function drawEdgeFade(ctx: CanvasRenderingContext2D, geo: Geometry) {
+  const fade = ctx.createLinearGradient(0, 0, 0, geo.height);
+  fade.addColorStop(0, "rgba(0,0,0,0.32)");
+  fade.addColorStop(0.13, "rgba(0,0,0,0)");
+  fade.addColorStop(0.87, "rgba(0,0,0,0)");
+  fade.addColorStop(1, "rgba(0,0,0,0.32)");
+  ctx.globalCompositeOperation = "destination-out";
+  ctx.fillStyle = fade;
+  ctx.fillRect(0, 0, geo.width, geo.height);
+  ctx.globalCompositeOperation = "source-over";
+}
+
+function drawHoverGuide(ctx: CanvasRenderingContext2D, geo: Geometry, palette: Palette) {
+  if (geo.hoverX === null) return;
+  ctx.fillStyle = palette.idle;
+  ctx.globalAlpha = 0.5;
+  ctx.fillRect(Math.round(geo.hoverX), 0, 1, geo.height);
+  ctx.globalAlpha = 1;
+}
+
+/** A glowing hairline with a cap at each end. */
+function drawPlayhead(ctx: CanvasRenderingContext2D, geo: Geometry, palette: Palette) {
+  const px = Math.max(1, Math.min(geo.width - 1, geo.progressX));
+
+  ctx.save();
+  ctx.shadowColor = palette.accent;
+  ctx.shadowBlur = 14;
+  ctx.fillStyle = palette.accent2;
+  ctx.fillRect(px - 1, 0, 2, geo.height);
+  ctx.restore();
+
+  ctx.fillStyle = palette.accent2;
+  ctx.beginPath();
+  ctx.roundRect(px - 3, 0, 6, 5, 2.5);
+  ctx.roundRect(px - 3, geo.height - 5, 6, 5, 2.5);
+  ctx.fill();
+}
+
+/** Size the backing store to the device pixel ratio. Returns the CSS width. */
+function fitCanvas(canvas: HTMLCanvasElement, cssWidth: number, cssHeight: number) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(cssWidth * dpr);
+  const h = Math.round(cssHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+    canvas.style.width = `${cssWidth}px`;
+    canvas.style.height = `${cssHeight}px`;
+  }
+  return dpr;
+}
 
 export function Waveform({
   peaks,
@@ -34,115 +179,31 @@ export function Waveform({
     const parent = canvas?.parentElement;
     if (!canvas || !parent) return;
 
-    const dpr = window.devicePixelRatio || 1;
-    const w = parent.clientWidth;
-    if (w === 0) return;
+    const cssWidth = parent.clientWidth;
+    if (cssWidth === 0) return;
 
-    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(height * dpr)) {
-      canvas.width = Math.round(w * dpr);
-      canvas.height = Math.round(height * dpr);
-      canvas.style.width = `${w}px`;
-      canvas.style.height = `${height}px`;
-    }
-
+    const dpr = fitCanvas(canvas, cssWidth, height);
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, height);
+    ctx.clearRect(0, 0, cssWidth, height);
 
-    const accent = cssVar(canvas, "--accent", "#8b6dff");
-    const accent2 = cssVar(canvas, "--accent-2", "#b39aff");
-    const idle = cssVar(canvas, "--wave-idle", "#55556a");
+    const palette = readPalette(canvas);
+    const geo: Geometry = {
+      width: cssWidth,
+      height,
+      mid: height / 2,
+      maxBar: height - 10,
+      barCount: Math.max(1, Math.floor((cssWidth + GAP) / (BAR + GAP))),
+      progressX: durationSec > 0 ? (currentTime / durationSec) * cssWidth : 0,
+      hoverX: hover !== null ? hover * cssWidth : null,
+    };
 
-    const mid = height / 2;
-    const maxBar = height - 10;
-    const bars = Math.max(1, Math.floor((w + GAP) / (BAR + GAP)));
-    const progressX = durationSec > 0 ? (currentTime / durationSec) * w : 0;
-    const hoverX = hover !== null ? hover * w : null;
-
-    // A lit band behind everything that has played.
-    if (progressX > 0) {
-      const wash = ctx.createLinearGradient(0, 0, 0, height);
-      wash.addColorStop(0, "transparent");
-      wash.addColorStop(0.5, accent);
-      wash.addColorStop(1, "transparent");
-      ctx.globalAlpha = 0.09;
-      ctx.fillStyle = wash;
-      ctx.fillRect(0, 0, progressX, height);
-      ctx.globalAlpha = 1;
-    }
-
-    // Played bars are brightest at the centre line, so the waveform reads as lit.
-    const played = ctx.createLinearGradient(0, mid - maxBar / 2, 0, mid + maxBar / 2);
-    played.addColorStop(0, accent2);
-    played.addColorStop(0.5, accent);
-    played.addColorStop(1, accent2);
-
-    for (let i = 0; i < bars; i++) {
-      const x = i * (BAR + GAP);
-
-      let amp = 0.045;
-      if (peaks && peaks.length > 0) {
-        const from = Math.floor((i / bars) * peaks.length);
-        const to = Math.max(from + 1, Math.floor(((i + 1) / bars) * peaks.length));
-        let sum = 0;
-        for (let p = from; p < to && p < peaks.length; p++) sum += peaks[p];
-        // A gentle curve keeps quiet passages visible without flattening loud ones.
-        amp = Math.max(0.06, Math.pow(sum / (to - from), 0.6));
-      }
-
-      let h = Math.max(3, amp * maxBar);
-
-      // Bars swell under the cursor.
-      if (hoverX !== null) {
-        const d = Math.abs(x + BAR / 2 - hoverX);
-        if (d < 34) h = Math.min(maxBar, h * (1 + 0.4 * (1 - d / 34)));
-      }
-
-      const isPlayed = x + BAR <= progressX;
-      ctx.fillStyle = isPlayed ? played : idle;
-      ctx.globalAlpha = isPlayed ? 1 : 0.78;
-      ctx.beginPath();
-      ctx.roundRect(x, mid - h / 2, BAR, h, BAR / 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-
-    // Soften the outer edges so the waveform sits on the panel rather than on top of it.
-    const fade = ctx.createLinearGradient(0, 0, 0, height);
-    fade.addColorStop(0, "rgba(0,0,0,0.32)");
-    fade.addColorStop(0.13, "rgba(0,0,0,0)");
-    fade.addColorStop(0.87, "rgba(0,0,0,0)");
-    fade.addColorStop(1, "rgba(0,0,0,0.32)");
-    ctx.globalCompositeOperation = "destination-out";
-    ctx.fillStyle = fade;
-    ctx.fillRect(0, 0, w, height);
-    ctx.globalCompositeOperation = "source-over";
-
-    // Hover guide.
-    if (hoverX !== null) {
-      ctx.fillStyle = idle;
-      ctx.globalAlpha = 0.5;
-      ctx.fillRect(Math.round(hoverX), 0, 1, height);
-      ctx.globalAlpha = 1;
-    }
-
-    // Playhead: a glowing hairline with a cap at each end.
-    if (durationSec > 0) {
-      const px = Math.max(1, Math.min(w - 1, progressX));
-      ctx.save();
-      ctx.shadowColor = accent;
-      ctx.shadowBlur = 14;
-      ctx.fillStyle = accent2;
-      ctx.fillRect(px - 1, 0, 2, height);
-      ctx.restore();
-
-      ctx.fillStyle = accent2;
-      ctx.beginPath();
-      ctx.roundRect(px - 3, 0, 6, 5, 2.5);
-      ctx.roundRect(px - 3, height - 5, 6, 5, 2.5);
-      ctx.fill();
-    }
+    drawProgressWash(ctx, geo, palette);
+    drawBars(ctx, geo, palette, peaks);
+    drawEdgeFade(ctx, geo);
+    drawHoverGuide(ctx, geo, palette);
+    if (durationSec > 0) drawPlayhead(ctx, geo, palette);
   }, [peaks, durationSec, currentTime, height, hover]);
 
   useEffect(() => {
@@ -166,7 +227,8 @@ export function Waveform({
   };
 
   const hoverTime = hover !== null ? hover * durationSec : 0;
-  const tipLeft = hover !== null ? Math.min(Math.max(hover * width, 26), Math.max(26, width - 26)) : 0;
+  const tipLeft =
+    hover !== null ? Math.min(Math.max(hover * width, 26), Math.max(26, width - 26)) : 0;
 
   return (
     <div
@@ -183,8 +245,9 @@ export function Waveform({
       aria-valuetext={`${formatClock(currentTime)} of ${formatClock(durationSec)}`}
       tabIndex={0}
       onKeyDown={(event) => {
-        if (event.key === "ArrowLeft") onSeek(Math.max(0, currentTime - 5));
-        if (event.key === "ArrowRight") onSeek(Math.min(durationSec, currentTime + 5));
+        if (event.key === "ArrowLeft") onSeek(Math.max(0, currentTime - NUDGE_SECONDS));
+        if (event.key === "ArrowRight")
+          onSeek(Math.min(durationSec, currentTime + NUDGE_SECONDS));
         if (event.key === "Home") onSeek(0);
       }}
     >

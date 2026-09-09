@@ -12,13 +12,12 @@ import {
 } from "lucide-react";
 import type { Job } from "@/lib/types";
 import { useApp } from "@/lib/store";
+import { isBusy } from "@/lib/jobStatus";
 import { formatBytes, formatDuration } from "@/lib/format";
 import { IconButton, Progress, Spinner } from "./ui";
 
-const BUSY: Job["status"][] = ["decoding", "loading-model", "transcribing"];
-
 function StatusIcon({ job }: { job: Job }) {
-  if (BUSY.includes(job.status)) return <Spinner className="size-3.5 text-accent" />;
+  if (isBusy(job.status)) return <Spinner className="size-3.5 text-accent" />;
   switch (job.status) {
     case "done":
       return (
@@ -36,7 +35,7 @@ function StatusIcon({ job }: { job: Job }) {
 }
 
 function statusLine(job: Job): string {
-  if (BUSY.includes(job.status)) {
+  if (isBusy(job.status)) {
     return job.stage ? `${job.stage} · ${Math.round(job.progress * 100)}%` : "Working";
   }
   switch (job.status) {
@@ -62,7 +61,7 @@ function JobRow({ job, selected }: { job: Job; selected: boolean }) {
   const retry = useApp((s) => s.retry);
   const cancel = useApp((s) => s.cancel);
 
-  const busy = BUSY.includes(job.status);
+  const busy = isBusy(job.status);
 
   return (
     <li

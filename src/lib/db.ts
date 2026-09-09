@@ -2,8 +2,8 @@
 
 import { createStore, get, set, del, clear, keys, type UseStore } from "idb-keyval";
 import type { Job, Settings } from "./types";
-
-const SETTINGS_KEY = "audio-transcription:settings:v1";
+import { isTerminal } from "./jobStatus";
+import { SETTINGS_STORAGE_KEY } from "./storageKeys";
 
 /** Audio larger than this is not copied into IndexedDB — transcripts still persist. */
 const MAX_PERSISTED_AUDIO_BYTES = 120 * 1024 * 1024;
@@ -31,7 +31,7 @@ export async function persistJob(
   // stored as cancelled — the row then offers "Run again" instead of sitting
   // on a queue that no longer exists.
   const clean: Job = { ...job, partial: undefined };
-  if (clean.status !== "done" && clean.status !== "error" && clean.status !== "cancelled") {
+  if (!isTerminal(clean.status)) {
     clean.status = "cancelled";
     clean.progress = 0;
     clean.stage = "";
@@ -81,7 +81,7 @@ export async function clearPersisted(): Promise<void> {
 export function loadSettings(): Partial<Settings> | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(SETTINGS_KEY);
+    const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
     return raw ? (JSON.parse(raw) as Partial<Settings>) : null;
   } catch {
     return null;
@@ -91,7 +91,7 @@ export function loadSettings(): Partial<Settings> | null {
 export function saveSettings(settings: Settings): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
   } catch {
     /* private-mode browsers can reject writes */
   }

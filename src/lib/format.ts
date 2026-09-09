@@ -1,30 +1,30 @@
 import type { Segment, Transcript } from "./types";
 import { languageName } from "./languages";
 
-/** `12:34` or `1:02:03` — for UI clocks. */
-export function formatClock(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
-  const total = Math.floor(seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
-  return h > 0
-    ? `${h}:${mm}:${String(s).padStart(2, "0")}`
-    : `${mm}:${String(s).padStart(2, "0")}`;
+const pad = (value: number, width = 2) => String(value).padStart(width, "0");
+
+/** Split a possibly-bogus number of seconds into clock components. */
+function splitTime(seconds: number) {
+  const safe = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  const total = Math.floor(safe);
+  return {
+    h: Math.floor(total / 3600),
+    m: Math.floor((total % 3600) / 60),
+    s: total % 60,
+    ms: Math.floor((safe % 1) * 1000),
+  };
 }
 
+/** `12:34` or `1:02:03` — for UI clocks. */
+export function formatClock(seconds: number): string {
+  const { h, m, s } = splitTime(seconds);
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+/** `00:12:34,560` — the subtitle cue format, comma for SRT and dot for VTT. */
 function stamp(seconds: number, msSep: "," | "."): string {
-  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
-  const ms = Math.floor((seconds % 1) * 1000);
-  const total = Math.floor(seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  return (
-    `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:` +
-    `${String(s).padStart(2, "0")}${msSep}${String(ms).padStart(3, "0")}`
-  );
+  const { h, m, s, ms } = splitTime(seconds);
+  return `${pad(h)}:${pad(m)}:${pad(s)}${msSep}${pad(ms, 3)}`;
 }
 
 export function formatBytes(bytes: number): string {

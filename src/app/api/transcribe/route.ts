@@ -1,19 +1,14 @@
 import { NextResponse } from "next/server";
+import { CLOUD_ENV_VARS } from "@/lib/models";
+import type { CloudProviderId } from "@/lib/types";
 
 export const runtime = "nodejs";
 // Long recordings can take a while on the provider side.
 export const maxDuration = 300;
 
-type CloudProvider = "openai" | "groq";
-
-const ENDPOINTS: Record<CloudProvider, string> = {
+const ENDPOINTS: Record<CloudProviderId, string> = {
   openai: "https://api.openai.com/v1/audio",
   groq: "https://api.groq.com/openai/v1/audio",
-};
-
-const ENV_KEYS: Record<CloudProvider, string> = {
-  openai: "OPENAI_API_KEY",
-  groq: "GROQ_API_KEY",
 };
 
 /** 25 MB is the documented upload ceiling for both providers. */
@@ -38,7 +33,7 @@ export async function POST(request: Request) {
   }
 
   const file = form.get("file");
-  const provider = String(form.get("provider") ?? "") as CloudProvider;
+  const provider = String(form.get("provider") ?? "") as CloudProviderId;
   const model = String(form.get("model") ?? "").trim();
   const language = String(form.get("language") ?? "auto");
   const task = String(form.get("task") ?? "transcribe");
@@ -58,10 +53,10 @@ export async function POST(request: Request) {
     );
   }
 
-  const apiKey = request.headers.get("x-provider-key")?.trim() || process.env[ENV_KEYS[provider]];
+  const apiKey = request.headers.get("x-provider-key")?.trim() || process.env[CLOUD_ENV_VARS[provider]];
   if (!apiKey) {
     return bad(
-      `No API key for ${provider}. Set ${ENV_KEYS[provider]} in .env.local, or paste a key in Settings.`,
+      `No API key for ${provider}. Set ${CLOUD_ENV_VARS[provider]} in .env.local, or paste a key in Settings.`,
       401,
     );
   }

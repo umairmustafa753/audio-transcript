@@ -1,11 +1,12 @@
 "use client";
 
 import { create } from "zustand";
-import type { Job, Segment, Settings, Transcript } from "./types";
-import { decodeAudioFile, isProbablyAudio } from "./audio";
+import type { CloudProviderId, Job, Segment, Settings, Transcript } from "./types";
+import { type DecodedAudio, decodeAudioFile, isProbablyAudio } from "./audio";
 import { CancelledError, localEngine } from "./localEngine";
 import { transcribeInCloud } from "./cloudEngine";
 import { joinText } from "./segments";
+import { isTerminal } from "./jobStatus";
 import { defaultModelFor, isEnglishOnly } from "./models";
 import {
   clearPersisted,
@@ -30,6 +31,9 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "system",
 };
 
+/** Decoding takes the first slice of the progress bar; the engine owns the rest. */
+const DECODE_PROGRESS_SHARE = 0.08;
+
 /** Audio blobs and waveforms live outside the reactive store — they are large and never rendered directly. */
 interface Media {
   file: File | null;
@@ -43,15 +47,12 @@ export function getMedia(id: string): Media | undefined {
   return media.get(id);
 }
 
-function mediaUrl(id: string): string | null {
+/** Object URLs are minted lazily and revoked when the job is removed. */
+export function audioUrl(id: string): string | null {
   const entry = media.get(id);
   if (!entry?.file) return null;
   if (!entry.url) entry.url = URL.createObjectURL(entry.file);
   return entry.url;
-}
-
-export function audioUrl(id: string): string | null {
-  return mediaUrl(id);
 }
 
 const abortControllers = new Map<string, AbortController>();
@@ -80,6 +81,14 @@ interface DownloadState {
   progress: number;
   loaded: number;
   total: number;
+}
+
+/** What either engine hands back once a job has finished decoding. */
+interface EngineResult {
+  segments: Segment[];
+  text: string;
+  language: string | null;
+  model: string;
 }
 
 interface AppState {
@@ -117,6 +126,96 @@ export const useApp = create<AppState>((set, get) => {
     await persistJob(job, entry?.file ?? null, entry?.peaks ?? null);
   }
 
+  /** Whisper in a worker: streams partial text and reports weight downloads. */
+  async function runOnDevice(
+    jobId: string,
+    decoded: DecodedAudio,
+    settings: Settings,
+  ): Promise<EngineResult> {
+    patchJob(jobId, { status: "loading-model", stage: "Loading model", progress: 0.09 });
+
+    const result = await localEngine().run(
+      {
+        jobId,
+        pcm: decoded.pcm,
+        durationSec: decoded.durationSec,
+        model: settings.localModel,
+        dtype: settings.dtype,
+        device: settings.device,
+        language: isEnglishOnly(settings.localModel) ? "en" : settings.language,
+        task: settings.task,
+        chunkLengthS: settings.chunkLengthS,
+        strideLengthS: settings.strideLengthS,
+      },
+      {
+        onDownload: (fileName, progress, loaded, total) => {
+          set({ download: { file: fileName, progress, loaded, total } });
+        },
+        onStage: (stage) => {
+          set({ download: null });
+          patchJob(jobId, {
+            status: stage === "Transcribing" ? "transcribing" : "loading-model",
+            stage,
+          });
+        },
+        onPartial: (partial, progress, tps) => {
+          set({ tps });
+          patchJob(jobId, {
+            status: "transcribing",
+            stage: "Transcribing",
+            partial,
+            progress: 0.1 + progress * 0.9,
+          });
+        },
+      },
+    );
+
+    return {
+      segments: result.segments,
+      text: result.text || joinText(result.segments),
+      language: result.language,
+      model: settings.localModel,
+    };
+  }
+
+  /** One upload to the API route, abortable so Cancel takes effect mid-flight. */
+  async function runInCloud(
+    jobId: string,
+    file: File,
+    decoded: DecodedAudio,
+    settings: Settings,
+    provider: CloudProviderId,
+  ): Promise<EngineResult> {
+    patchJob(jobId, {
+      status: "transcribing",
+      stage: `Uploading to ${provider}`,
+      progress: 0.2,
+    });
+
+    const controller = new AbortController();
+    abortControllers.set(jobId, controller);
+    try {
+      const result = await transcribeInCloud({
+        file,
+        provider,
+        model: settings.cloudModel,
+        language: settings.language,
+        task: settings.task,
+        apiKey: settings.apiKeys[provider],
+        durationSec: decoded.durationSec,
+        signal: controller.signal,
+      });
+      return {
+        segments: result.segments,
+        text: result.text || joinText(result.segments),
+        language: result.language,
+        model: settings.cloudModel,
+      };
+    } finally {
+      abortControllers.delete(jobId);
+    }
+  }
+
   async function runJob(job: Job) {
     const { settings } = get();
     const entry = media.get(job.id);
@@ -146,95 +245,26 @@ export const useApp = create<AppState>((set, get) => {
 
     try {
       const decoded = await decodeAudioFile(file, (fraction) => {
-        patchJob(job.id, { progress: fraction * 0.08, stage: "Reading audio" });
+        patchJob(job.id, {
+          progress: fraction * DECODE_PROGRESS_SHARE,
+          stage: "Reading audio",
+        });
       });
 
       if (entry) entry.peaks = decoded.peaks;
       patchJob(job.id, { durationSec: decoded.durationSec });
 
-      let segments: Segment[];
-      let text: string;
-      let language: string | null;
-      let modelUsed: string;
-
-      if (settings.provider === "local") {
-        modelUsed = settings.localModel;
-        patchJob(job.id, { status: "loading-model", stage: "Loading model", progress: 0.09 });
-
-        const result = await localEngine().run(
-          {
-            jobId: job.id,
-            pcm: decoded.pcm,
-            durationSec: decoded.durationSec,
-            model: settings.localModel,
-            dtype: settings.dtype,
-            device: settings.device,
-            language: isEnglishOnly(settings.localModel) ? "en" : settings.language,
-            task: settings.task,
-            chunkLengthS: settings.chunkLengthS,
-            strideLengthS: settings.strideLengthS,
-          },
-          {
-            onDownload: (fileName, progress, loaded, total) => {
-              set({ download: { file: fileName, progress, loaded, total } });
-            },
-            onStage: (stage) => {
-              set({ download: null });
-              patchJob(job.id, {
-                status: stage === "Transcribing" ? "transcribing" : "loading-model",
-                stage,
-              });
-            },
-            onPartial: (partial, progress, tps) => {
-              set({ tps });
-              patchJob(job.id, {
-                status: "transcribing",
-                stage: "Transcribing",
-                partial,
-                progress: 0.1 + progress * 0.9,
-              });
-            },
-          },
-        );
-
-        segments = result.segments;
-        text = result.text || joinText(result.segments);
-        language = result.language;
-      } else {
-        modelUsed = settings.cloudModel;
-        patchJob(job.id, {
-          status: "transcribing",
-          stage: `Uploading to ${settings.provider}`,
-          progress: 0.2,
-        });
-
-        const controller = new AbortController();
-        abortControllers.set(job.id, controller);
-        try {
-          const result = await transcribeInCloud({
-            file,
-            provider: settings.provider,
-            model: settings.cloudModel,
-            language: settings.language,
-            task: settings.task,
-            apiKey: settings.apiKeys[settings.provider],
-            durationSec: decoded.durationSec,
-            signal: controller.signal,
-          });
-          segments = result.segments;
-          text = result.text || joinText(result.segments);
-          language = result.language;
-        } finally {
-          abortControllers.delete(job.id);
-        }
-      }
+      const result =
+        settings.provider === "local"
+          ? await runOnDevice(job.id, decoded, settings)
+          : await runInCloud(job.id, file, decoded, settings, settings.provider);
 
       const transcript: Transcript = {
-        text,
-        segments,
-        language,
+        text: result.text,
+        segments: result.segments,
+        language: result.language,
         durationSec: decoded.durationSec,
-        model: modelUsed,
+        model: result.model,
         provider: settings.provider,
         task: settings.task,
         createdAt: Date.now(),
@@ -283,6 +313,11 @@ export const useApp = create<AppState>((set, get) => {
     }
   }
 
+  /** After a job leaves the list, fall back to the newest finished transcript. */
+  function fallbackSelection(jobs: Job[]): string | null {
+    return jobs.find((job) => job.status === "done")?.id ?? null;
+  }
+
   return {
     jobs: [],
     selectedId: null,
@@ -313,12 +348,7 @@ export const useApp = create<AppState>((set, get) => {
       const jobs = records.map((r) => r.job);
       lastStamp = jobs.reduce((max, job) => Math.max(max, job.createdAt), lastStamp);
 
-      set({
-        settings,
-        jobs,
-        hydrated: true,
-        selectedId: jobs.find((j) => j.status === "done")?.id ?? null,
-      });
+      set({ settings, jobs, hydrated: true, selectedId: fallbackSelection(jobs) });
     },
 
     addFiles(files) {
@@ -379,7 +409,7 @@ export const useApp = create<AppState>((set, get) => {
         return {
           jobs,
           selectedId:
-            state.selectedId === id ? (jobs.find((j) => j.status === "done")?.id ?? null) : state.selectedId,
+            state.selectedId === id ? fallbackSelection(jobs) : state.selectedId,
         };
       });
     },
@@ -410,8 +440,7 @@ export const useApp = create<AppState>((set, get) => {
 
     cancel(id) {
       const job = get().jobs.find((j) => j.id === id);
-      if (!job) return;
-      if (job.status === "done" || job.status === "error" || job.status === "cancelled") return;
+      if (!job || isTerminal(job.status)) return;
 
       abortControllers.get(id)?.abort();
       localEngine().cancel(id);
@@ -421,7 +450,7 @@ export const useApp = create<AppState>((set, get) => {
 
     cancelAll() {
       for (const job of get().jobs) {
-        if (job.status !== "done" && job.status !== "error") get().cancel(job.id);
+        if (!isTerminal(job.status)) get().cancel(job.id);
       }
     },
 

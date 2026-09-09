@@ -1,6 +1,6 @@
 "use client";
 
-import type { ProviderId, Segment, Task } from "./types";
+import type { CloudProviderId, Segment, Task } from "./types";
 import { singleSegment } from "./segments";
 
 export interface CloudRunResult {
@@ -11,7 +11,7 @@ export interface CloudRunResult {
 
 export interface CloudRunOptions {
   file: File;
-  provider: Exclude<ProviderId, "local">;
+  provider: CloudProviderId;
   model: string;
   language: string;
   task: Task;

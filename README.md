@@ -107,6 +107,16 @@ src/
     db.ts                     IndexedDB persistence for jobs, audio and settings
     segments.ts               timestamp clean-up and lookup
     format.ts                 TXT / SRT / VTT / MD / CSV / JSON exporters
+    models.ts                 model catalogue, provider list, env var names
+    jobStatus.ts              isBusy / isTerminal — the only place statuses are grouped
+    hooks.ts                  shared UI hooks (Escape, outside-click, theme, shortcuts)
+    storageKeys.ts            the localStorage key, shared with the pre-paint theme script
+  components/
+    TranscriptPanel.tsx       composes the transcript view
+    transcript/               header, toolbar, live progress, segment list, reading view
+    SettingsPanel.tsx         the drawer shell
+    settings/                 one file per settings section
+    ui.tsx                    Button, Select, Field, Badge, Segmented, Progress, …
 ```
 
 Audio is decoded on the main thread with the Web Audio API — which is why no

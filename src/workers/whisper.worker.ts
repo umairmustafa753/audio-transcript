@@ -14,9 +14,16 @@ import type {
   WorkerRequest,
   WorkerResponse,
 } from "@/lib/workerMessages";
+import { isEnglishOnly } from "@/lib/models";
 import type { Device, Dtype } from "@/lib/types";
+
 const LANGUAGE_TOKEN = /^<\|([a-z]{2,3})\|>$/;
-const DETECTION_WINDOW_SAMPLES = 30 * 16000;
+/** Whisper's receptive field: it only ever sees 30 seconds at a time. */
+const WHISPER_WINDOW_SECONDS = 30;
+const SAMPLE_RATE = 16000;
+const DETECTION_WINDOW_SAMPLES = WHISPER_WINDOW_SECONDS * SAMPLE_RATE;
+/** Upper bound on how often streaming text is posted to the main thread. */
+const PARTIAL_THROTTLE_MS = 120;
 /** Anything below this is treated as silence when hunting for speech to sample. */
 const SILENCE_THRESHOLD = 0.015;
 
@@ -186,37 +193,35 @@ async function detectLanguage(
   return bestCode;
 }
 
-async function run(request: RunRequest) {
-  const { jobId, pcm, durationSec, model, dtype, device, language, task } = request;
+interface Chunking {
+  enabled: boolean;
+  chunkLengthS: number;
+  strideLengthS: number;
+}
 
-  if (cancelledBeforeStart.delete(jobId)) {
-    post({ type: "cancelled", jobId });
-    return;
-  }
-
-  post({ type: "stage", jobId, stage: "Loading model", progress: 0 });
-  const { transcriber, device: resolvedDevice } = await getTranscriber(model, dtype, device);
-
-  const stopper = new InterruptableStoppingCriteria();
-  stoppers.set(jobId, stopper);
-
-  // Audio shorter than Whisper's 30s receptive field needs no chunking.
-  const useChunking = durationSec > 30;
-  const chunkLengthS = useChunking ? request.chunkLengthS : 0;
-  const strideLengthS = useChunking ? request.strideLengthS : 0;
-
+/**
+ * Wires a WhisperTextStreamer to throttled `partial` messages and accumulates
+ * the decoded text, which stands in for the pipeline output if it returns none.
+ */
+function createStreamer(
+  transcriber: Transcriber,
+  jobId: string,
+  durationSec: number,
+  chunking: Chunking,
+) {
   let chunkCount = 0;
   let tokenCount = 0;
   let firstTokenAt: number | null = null;
   let text = "";
   let lastPost = 0;
+
   const emitProgress = (currentTime: number, force = false) => {
-    const elapsedAudio = useChunking
-      ? Math.max(0, chunkLengthS - strideLengthS) * chunkCount + currentTime
+    const elapsedAudio = chunking.enabled
+      ? Math.max(0, chunking.chunkLengthS - chunking.strideLengthS) * chunkCount + currentTime
       : currentTime;
     const progress = durationSec > 0 ? Math.min(0.999, elapsedAudio / durationSec) : 0;
     const now = performance.now();
-    if (!force && now - lastPost < 120) return;
+    if (!force && now - lastPost < PARTIAL_THROTTLE_MS) return;
     lastPost = now;
     const tps =
       firstTokenAt !== null && tokenCount > 1
@@ -247,21 +252,89 @@ async function run(request: RunRequest) {
     },
   });
 
-  const isEnglishOnly = model.endsWith(".en");
+  return { streamer, streamedText: () => text };
+}
 
-  // Resolve "auto" to a concrete language before generating, so the model is
-  // never left to fall back to English on non-English audio.
-  let resolvedLanguage: string | null = isEnglishOnly ? "en" : language;
-  let detectedLanguage: string | null = null;
-  if (!isEnglishOnly && language === "auto") {
-    post({ type: "stage", jobId, stage: "Detecting language", progress: 0 });
-    try {
-      detectedLanguage = await detectLanguage(transcriber, pcm);
-    } catch {
-      // Detection is an optimisation; fall through to English if it fails.
-    }
-    resolvedLanguage = detectedLanguage ?? "en";
+/**
+ * Resolve "auto" to a concrete language before generating, so the model is never
+ * left to fall back to English on non-English audio.
+ */
+async function resolveLanguage(
+  transcriber: Transcriber,
+  jobId: string,
+  pcm: Float32Array,
+  englishOnly: boolean,
+  requested: string,
+): Promise<string> {
+  if (englishOnly) return "en";
+  if (requested !== "auto") return requested;
+
+  post({ type: "stage", jobId, stage: "Detecting language", progress: 0 });
+  try {
+    return (await detectLanguage(transcriber, pcm)) ?? "en";
+  } catch {
+    // Detection is an optimisation; fall back to English if it fails.
+    return "en";
   }
+}
+
+function generationOptions(
+  streamer: unknown,
+  stopper: InterruptableStoppingCriteria,
+  chunking: Chunking,
+  englishOnly: boolean,
+  task: string,
+  language: string,
+): Record<string, unknown> {
+  const options: Record<string, unknown> = {
+    return_timestamps: true,
+    force_full_sequences: false,
+    streamer,
+    stopping_criteria: stopper,
+  };
+  if (chunking.enabled) {
+    options.chunk_length_s = chunking.chunkLengthS;
+    options.stride_length_s = chunking.strideLengthS;
+  }
+  if (!englishOnly) {
+    options.task = task;
+    options.language = language;
+  }
+  return options;
+}
+
+async function run(request: RunRequest) {
+  const { jobId, pcm, durationSec, model, dtype, device, language, task } = request;
+
+  if (cancelledBeforeStart.delete(jobId)) {
+    post({ type: "cancelled", jobId });
+    return;
+  }
+
+  post({ type: "stage", jobId, stage: "Loading model", progress: 0 });
+  const { transcriber, device: resolvedDevice } = await getTranscriber(model, dtype, device);
+
+  const stopper = new InterruptableStoppingCriteria();
+  stoppers.set(jobId, stopper);
+
+  // Audio shorter than Whisper's 30s receptive field needs no chunking.
+  const useChunking = durationSec > WHISPER_WINDOW_SECONDS;
+  const chunking: Chunking = {
+    enabled: useChunking,
+    chunkLengthS: useChunking ? request.chunkLengthS : 0,
+    strideLengthS: useChunking ? request.strideLengthS : 0,
+  };
+
+  const { streamer, streamedText } = createStreamer(transcriber, jobId, durationSec, chunking);
+
+  const englishOnly = isEnglishOnly(model);
+  const resolvedLanguage = await resolveLanguage(
+    transcriber,
+    jobId,
+    pcm,
+    englishOnly,
+    language,
+  );
 
   if (stopper.interrupted) {
     stoppers.delete(jobId);
@@ -271,23 +344,11 @@ async function run(request: RunRequest) {
 
   post({ type: "stage", jobId, stage: "Transcribing", progress: 0 });
 
-  const options: Record<string, unknown> = {
-    return_timestamps: true,
-    force_full_sequences: false,
-    streamer,
-    stopping_criteria: stopper,
-  };
-  if (useChunking) {
-    options.chunk_length_s = chunkLengthS;
-    options.stride_length_s = strideLengthS;
-  }
-  if (!isEnglishOnly) {
-    options.task = task;
-    options.language = resolvedLanguage;
-  }
-
   try {
-    const output = await transcriber(pcm, options);
+    const output = await transcriber(
+      pcm,
+      generationOptions(streamer, stopper, chunking, englishOnly, task, resolvedLanguage),
+    );
     if (stopper.interrupted) {
       post({ type: "cancelled", jobId });
       return;
@@ -297,7 +358,7 @@ async function run(request: RunRequest) {
     post({
       type: "result",
       jobId,
-      text: typeof output?.text === "string" ? output.text : text,
+      text: typeof output?.text === "string" ? output.text : streamedText(),
       chunks: rawChunks,
       language: resolvedLanguage,
       device: resolvedDevice,

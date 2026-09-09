@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Check, Copy, Download } from "lucide-react";
 import type { Transcript } from "@/lib/types";
 import { EXPORT_FORMATS, baseName, download, serialize } from "@/lib/format";
+import { useOnEscape, useOutsideClick } from "@/lib/hooks";
 import { Button } from "./ui";
 
 export function ExportMenu({
@@ -17,21 +18,9 @@ export function ExportMenu({
   const [copied, setCopied] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (!containerRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
+  const close = () => setOpen(false);
+  useOutsideClick(containerRef, open, close);
+  useOnEscape(open, close);
 
   const hasSegments = transcript.segments.length > 0;
 
