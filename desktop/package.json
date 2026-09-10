@@ -1,0 +1,10 @@
+{
+  "name": "scribe",
+  "productName": "Scribe",
+  "version": "0.1.0",
+  "description": "Transcribe audio and video files on your computer.",
+  "author": "Umair Mustafa",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs"
+}

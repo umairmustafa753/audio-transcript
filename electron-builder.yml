@@ -1,0 +1,54 @@
+# Packages the desktop app. `npm run desktop:dist` builds for the current OS;
+# see the "Desktop app" section of the README for the other targets.
+
+# Windows uses appId to recognise upgrades — do not change it after a release.
+appId: com.umairmustafa.scribe
+productName: Scribe
+copyright: Copyright © 2026 Umair Mustafa
+
+directories:
+  app: desktop
+  output: dist-desktop
+  buildResources: desktop/build
+
+# The shell needs nothing from node_modules; without the exclusion electron-builder
+# falls back to the project's dependencies and packs all of them (~360 MB).
+files:
+  - main.mjs
+  - package.json
+  - "!**/node_modules/**"
+npmRebuild: false
+
+# The Next.js server, built by scripts/build-desktop.mjs. Kept outside the asar
+# archive because it runs in its own process and reads its files from disk.
+# Copied from .next rather than .next/standalone on purpose: electron-builder
+# always drops a node_modules folder at the root of the source, whatever the
+# filter says, and the server cannot start without it.
+extraResources:
+  - from: .next
+    to: .
+    filter:
+      - "standalone/**/*"
+      - "!**/.env*"
+
+mac:
+  category: public.app-category.productivity
+  # Ad-hoc signature: runs on the Mac that built it, and elsewhere after
+  # "Open Anyway" in System Settings. Left to itself electron-builder would sign
+  # with whatever certificate the keychain lists first. For releases, put the
+  # exact "Developer ID Application: …" name here and configure notarization.
+  identity: "-"
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+
+win:
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false

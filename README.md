@@ -13,6 +13,8 @@ npm run dev      # http://localhost:3000
 
 No API key, no `.env`, no ffmpeg. Drop a file in and it transcribes.
 
+It also ships as a desktop app for macOS and Windows — see [Desktop app](#desktop-app).
+
 ---
 
 ## What it does
@@ -147,3 +149,70 @@ npm run build   # production build
 npm start       # serve the production build
 npm run lint    # eslint
 ```
+
+## Desktop app
+
+The same app, packaged with [Electron](https://www.electronjs.org/) for macOS and
+Windows. Electron bundles its own Chromium, so WebGPU, the Whisper worker and the
+multi-threaded WASM backend behave the same on both systems.
+
+```bash
+npm run desktop            # build, then open the app from this checkout
+npm run desktop:dist       # installer for the OS you are on → dist-desktop/
+npm run desktop:dist:mac   # Scribe-<version>-arm64.dmg and Scribe-<version>.dmg (Intel)
+npm run desktop:dist:win   # Scribe Setup <version>.exe (x64 + arm64)
+```
+
+For UI work, run `npm run dev` in one terminal and `npm run desktop:dev` in
+another: the window then loads the dev server with hot reload.
+
+Windows installers are most reliably built on Windows. The **Desktop app**
+GitHub Actions workflow builds both platforms; start it from the Actions tab or
+by pushing a `v*` tag, then download the installers from the run's artifacts.
+
+### How it works
+
+```
+desktop/main.mjs          Electron main process
+scripts/build-desktop.mjs builds Next.js as a self-contained server (.next/standalone)
+electron-builder.yml      packaging: DMG for macOS, NSIS installer for Windows
+```
+
+At launch the app starts that server on a free `127.0.0.1` port in a background
+process, and the window loads it through a private `app://scribe` address. The
+API route keeps working, and with no Vercel in front of it there is no 4.5 MB
+upload cap — only the providers' own 25 MB limit.
+
+The fixed address matters: saved transcripts live in IndexedDB, which is keyed by
+address, and the app's profile folder is pinned to `Scribe` (in
+`~/Library/Application Support` on macOS, `%APPDATA%` on Windows). Changing
+either one in `desktop/main.mjs` would hide every user's saved transcripts.
+
+`.env` files are removed from the packaged server, because anything in them
+would ship to everyone who installs the app. Desktop users paste API keys in
+Settings instead.
+
+### Moving existing transcripts into the desktop app
+
+Browser storage cannot be read from another app, so transcripts move by file:
+
+1. Open the web version where your transcripts are (for example
+   `npm run dev` → http://localhost:3000, in the same browser as before).
+2. **Settings → Backup → Export backup** saves a `.scribe` file with every
+   transcript, its audio and your settings. API keys are left out.
+3. In the desktop app, **Settings → Backup → Import backup** and pick that file.
+
+Importing is safe to repeat; transcripts that are already there are skipped.
+Nothing is removed from the browser.
+
+### Signing
+
+Builds are not signed with a real certificate yet, so the first launch shows a
+warning:
+
+- **macOS**: "Apple could not verify…". Open **System Settings → Privacy &
+  Security** and click **Open Anyway**. To remove the warning, get an Apple
+  Developer ID ($99/year), set `mac.identity` in `electron-builder.yml`, and
+  configure notarization.
+- **Windows**: SmartScreen says "Windows protected your PC". Click
+  **More info → Run anyway**. A code-signing certificate removes it.

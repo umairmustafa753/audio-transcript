@@ -8,7 +8,7 @@ import { SETTINGS_STORAGE_KEY } from "./storageKeys";
 /** Audio larger than this is not copied into IndexedDB — transcripts still persist. */
 const MAX_PERSISTED_AUDIO_BYTES = 120 * 1024 * 1024;
 
-interface StoredRecord {
+export interface StoredRecord {
   job: Job;
   file: File | null;
   peaks: Float32Array | null;
@@ -21,23 +21,29 @@ function jobStore(): UseStore {
   return store;
 }
 
-export async function persistJob(
-  job: Job,
-  file: File | null,
-  peaks: Float32Array | null,
-): Promise<void> {
-  // Transient fields never need to survive a reload. A job that is still in
-  // flight is only ever read back if the page went away mid-run, so it is
-  // stored as cancelled — the row then offers "Run again" instead of sitting
-  // on a queue that no longer exists.
+/**
+ * Transient fields never need to survive a reload. A job that is still in
+ * flight is only ever read back if the page went away mid-run, so it is
+ * stored as cancelled — the row then offers "Run again" instead of sitting
+ * on a queue that no longer exists.
+ */
+export function storableJob(job: Job): Job {
   const clean: Job = { ...job, partial: undefined };
   if (!isTerminal(clean.status)) {
     clean.status = "cancelled";
     clean.progress = 0;
     clean.stage = "";
   }
+  return clean;
+}
+
+export async function persistJob(
+  job: Job,
+  file: File | null,
+  peaks: Float32Array | null,
+): Promise<void> {
   const record: StoredRecord = {
-    job: clean,
+    job: storableJob(job),
     file: file && file.size <= MAX_PERSISTED_AUDIO_BYTES ? file : null,
     peaks,
   };

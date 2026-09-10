@@ -5,6 +5,7 @@ import { X } from "lucide-react";
 import { useApp } from "@/lib/store";
 import { useOnEscape } from "@/lib/hooks";
 import { AppearanceSection } from "./settings/AppearanceSection";
+import { BackupSection } from "./settings/BackupSection";
 import { CloudModelSection } from "./settings/CloudModelSection";
 import { EngineSection } from "./settings/EngineSection";
 import { LocalModelSection } from "./settings/LocalModelSection";
@@ -56,6 +57,7 @@ export function SettingsPanel({ open, onClose }: { open: boolean; onClose: () =>
           <TranscriptionSection />
           {isLocal ? <PerformanceSection /> : null}
           <AppearanceSection />
+          <BackupSection />
         </div>
       </aside>
     </>

@@ -5,6 +5,7 @@ import type { CloudProviderId, Job, Segment, Settings, Transcript } from "./type
 import { type DecodedAudio, decodeAudioFile, isProbablyAudio } from "./audio";
 import { CancelledError, localEngine } from "./localEngine";
 import { transcribeInCloud } from "./cloudEngine";
+import type { Backup } from "./backup";
 import { joinText } from "./segments";
 import { isTerminal } from "./jobStatus";
 import { defaultModelFor, isEnglishOnly } from "./models";
@@ -30,6 +31,21 @@ export const DEFAULT_SETTINGS: Settings = {
   apiKeys: {},
   theme: "system",
 };
+
+/** Fills gaps from defaults and repairs values that older builds could save. */
+function normalizeSettings(stored: Partial<Settings> | null): Settings {
+  const settings: Settings = {
+    ...DEFAULT_SETTINGS,
+    ...stored,
+    apiKeys: { ...DEFAULT_SETTINGS.apiKeys, ...stored?.apiKeys },
+  };
+  if (!settings.cloudModel && settings.provider !== "local") {
+    settings.cloudModel = defaultModelFor(settings.provider);
+  }
+  // Older builds offered q8/fp16, which onnxruntime-web cannot load.
+  if (settings.dtype !== "q4" && settings.dtype !== "fp32") settings.dtype = "q4";
+  return settings;
+}
 
 /** Decoding takes the first slice of the progress bar; the engine owns the rest. */
 const DECODE_PROGRESS_SHARE = 0.08;
@@ -102,6 +118,7 @@ interface AppState {
 
   hydrate: () => Promise<void>;
   addFiles: (files: File[]) => { added: number; rejected: string[] };
+  importBackup: (backup: Backup) => Promise<{ added: number; skipped: number }>;
   select: (id: string | null) => void;
   remove: (id: string) => void;
   clearAll: () => void;
@@ -329,17 +346,7 @@ export const useApp = create<AppState>((set, get) => {
 
     async hydrate() {
       if (get().hydrated) return;
-      const stored = loadSettings();
-      const settings: Settings = {
-        ...DEFAULT_SETTINGS,
-        ...stored,
-        apiKeys: { ...DEFAULT_SETTINGS.apiKeys, ...stored?.apiKeys },
-      };
-      if (!settings.cloudModel && settings.provider !== "local") {
-        settings.cloudModel = defaultModelFor(settings.provider);
-      }
-      // Older builds offered q8/fp16, which onnxruntime-web cannot load.
-      if (settings.dtype !== "q4" && settings.dtype !== "fp32") settings.dtype = "q4";
+      const settings = normalizeSettings(loadSettings());
 
       const records = await loadPersisted();
       for (const record of records) {
@@ -392,6 +399,30 @@ export const useApp = create<AppState>((set, get) => {
       }
 
       return { added: newJobs.length, rejected };
+    },
+
+    async importBackup(backup) {
+      const known = new Set(get().jobs.map((job) => job.id));
+      // Importing the same backup twice must not duplicate anything.
+      const fresh = backup.records.filter((record) => !known.has(record.job.id));
+
+      for (const record of fresh) {
+        media.set(record.job.id, { file: record.file, url: null, peaks: record.peaks });
+        await persistJob(record.job, record.file, record.peaks);
+      }
+
+      const jobs = [...get().jobs, ...fresh.map((r) => r.job)].sort(
+        (a, b) => a.createdAt - b.createdAt,
+      );
+      lastStamp = jobs.reduce((max, job) => Math.max(max, job.createdAt), lastStamp);
+      set((state) => ({ jobs, selectedId: state.selectedId ?? fallbackSelection(jobs) }));
+
+      // Backups never carry API keys, so keep whichever ones are already set here.
+      get().updateSettings(
+        normalizeSettings({ ...backup.settings, apiKeys: get().settings.apiKeys }),
+      );
+
+      return { added: fresh.length, skipped: backup.records.length - fresh.length };
     },
 
     select(id) {
